@@ -24,10 +24,13 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
+
+DEFAULT_OUTPUT_DIR = Path(os.environ.get("BANGERSURE_OUTPUT_DIR", r"C:\xampp\htdocs\bangersure.com\data"))
 
 API_URL = "https://2up.io/api/sportProtal/web/event/date/list?eventDateList"
 REFERER_URL = "https://2up.io/pt/sports/home?section=upcoming&sport=soccer"
@@ -127,7 +130,7 @@ def build_item_skeleton_from_api(event_node: Dict[str, Any]) -> Dict[str, Any]:
 
 def extract_markets_from_api(event_node: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Extract ML (moneyline), Totals, and Spread (Asian Handicap) markets into a normalized structure.
+    Extract ML (moneyline), Totals, and Handicap (Asian Handicap) markets into a normalized structure.
     Keep the same core logic you provided, but a bit cleaned up.
     """
     now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -145,8 +148,19 @@ def extract_markets_from_api(event_node: Dict[str, Any]) -> List[Dict[str, Any]]
         mtid = str(m.get("marketTypeId") or "").lower()
         selections = m.get("selections") or []
 
-        # FT 1X2 (Moneyline)
-        if not ml_done and (name == "ft 1x2" or mtid == "ml0"):
+        # FT 1X2 (Moneyline) - APENAS mercado principal, não Double Chance
+        # PRIORIDADE: nome exato "ft 1x2" ou mtid "ml0" (mais confiável)
+        is_1x2_main = False
+        is_main_confirmed = False
+        
+        # Verifica se é mercado 1X2 principal confirmado
+        if name == "ft 1x2" or mtid == "ml0":
+            if "double" not in name and "chance" not in name:
+                is_1x2_main = True
+                # Nome exato "ft 1x2" ou mtid "ml0" = mercado principal confirmado
+                is_main_confirmed = True
+        
+        if not ml_done and is_1x2_main:
             home_p = draw_p = away_p = None
             for s in selections:
                 outcome = str(s.get("outcomeType") or "").lower()
@@ -160,9 +174,18 @@ def extract_markets_from_api(event_node: Dict[str, Any]) -> List[Dict[str, Any]]
                     draw_p = price
                 elif outcome == "away":
                     away_p = price
+            # Só adiciona se tiver todas as 3 odds (casa, empate, fora)
+            # E se for mercado principal confirmado (prioridade)
             if home_p and draw_p and away_p:
-                markets_out.append({"name": "ML", "updatedAt": now_iso, "odds": [{"home": home_p, "draw": draw_p, "away": away_p}]})
-                ml_done = True
+                # Se já existe ML e este não é principal confirmado, não sobrescreve
+                # Se é principal confirmado ou não existe ML, adiciona
+                existing_ml = next((m for m in markets_out if m.get("name") == "ML"), None)
+                if is_main_confirmed or not existing_ml:
+                    if existing_ml:
+                        # Remove o anterior se este é principal confirmado
+                        markets_out = [m for m in markets_out if m.get("name") != "ML"]
+                    markets_out.append({"name": "ML", "updatedAt": now_iso, "odds": [{"home": home_p, "draw": draw_p, "away": away_p}]})
+                    ml_done = True
             continue
 
         # FT O/U (Totals)
@@ -190,7 +213,7 @@ def extract_markets_from_api(event_node: Dict[str, Any]) -> List[Dict[str, Any]]
                     rec["under"] = price
             continue
 
-        # FT Asian Handicap (Spread)
+        # FT Asian Handicap
         if (name == "ft asian handicap" or mtid == "hc0"):
             home_pts = None
             home_price = None
@@ -232,14 +255,14 @@ def extract_markets_from_api(event_node: Dict[str, Any]) -> List[Dict[str, Any]]
     if handicap_lines:
         lines = list(handicap_lines.values())
         lines.sort(key=lambda x: x["hdp"])
-        markets_out.append({"name": "Spread", "updatedAt": now_iso, "odds": lines})
+        markets_out.append({"name": "Handicap", "updatedAt": now_iso, "odds": lines})
 
     # Log a small per-match summary
     try:
         ml_present = any(m.get("name") == "ML" for m in markets_out)
         totals_cnt = next((len(m.get("odds", [])) for m in markets_out if m.get("name") == "Totals"), 0)
-        spread_cnt = next((len(m.get("odds", [])) for m in markets_out if m.get("name") == "Spread"), 0)
-        ok(f"{EMO_MATCH} {event_name}: ML={'yes' if ml_present else 'no'} | Totals={totals_cnt} | Spread={spread_cnt}")
+        handicap_cnt = next((len(m.get("odds", [])) for m in markets_out if m.get("name") == "Handicap"), 0)
+        ok(f"{EMO_MATCH} {event_name}: ML={'yes' if ml_present else 'no'} | Totals={totals_cnt} | Handicap={handicap_cnt}")
     except Exception:
         pass
 
@@ -302,7 +325,7 @@ def build_headers(cookies: str, x_sign: str, x_ts: str) -> Dict[str, str]:
 
 def scrape_api_only(
     output_path: str,
-    max_matches: int = 20,
+    max_matches: Optional[int] = None,  # None = sem limite
     hours_ahead: int = 48,
     page_size: int = 50,
     page_num_start: int = 1,
@@ -310,7 +333,7 @@ def scrape_api_only(
     x_sign: str = "",
     x_ts: str = "",
     verbose: bool = False,
-    exhaust: bool = True,
+    exhaust: bool = True,  # Sempre True para coletar tudo
 ) -> List[Dict[str, Any]]:
     now = datetime.now(timezone.utc)
     window_ms = int(hours_ahead * 3600 * 1000)
@@ -332,7 +355,7 @@ def scrape_api_only(
         info("Using X-Request-Sign and X-Request-Timestamp 🔐")
 
     window_idx = 0
-    # Iterate windows until empty or until max reached (unless exhaust disables the cap)
+    # Iterate windows until empty (sem limite de jogos)
     while True:
         window_idx += 1
         human_start = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
@@ -342,10 +365,7 @@ def scrape_api_only(
         page = page_num_start
         got_any_in_window = False
         while True:
-            # Respect max unless exhaust wants to continue regardless
-            if not exhaust and len(results) >= max_matches:
-                break
-
+            # Sem limite - coleta TODOS os jogos disponíveis
             payload = {
                 "isLive": 0,
                 "pageType": 5,
@@ -354,7 +374,7 @@ def scrape_api_only(
                 "leagueUrl": "",
                 "startTime": start_ms,
                 "endTime": end_ms,
-                "pageSize": min(page_size, max_matches if not exhaust else page_size),
+                "pageSize": page_size,  # Sem limite no pageSize
                 "pageNum": page,
             }
             info(f"Fetching page {page} … {EMO_PAGE}")
@@ -391,13 +411,12 @@ def scrape_api_only(
             if not items:
                 break
 
-            # Collect unique events
+            # Collect unique events (sem limite)
             for ev in items:
                 ev_id = str(ev.get("eventId") or "")
                 if ev_id and ev_id in seen_event_ids:
                     continue
-                if not exhaust and len(results) >= max_matches:
-                    break
+                # Sem verificação de limite - adiciona todos
                 item = build_item_skeleton_from_api(ev)
                 markets = extract_markets_from_api(ev)
                 if markets:
@@ -413,16 +432,20 @@ def scrape_api_only(
                 break
             page += 1
 
-        # Stop if reached cap (when not exhausting) or nothing returned in this window
-        if (not exhaust and len(results) >= max_matches) or not got_any_in_window:
+        # Stop if nothing returned in this window (sem limite de jogos)
+        if not got_any_in_window:
             break
         # Advance window
         start_ms = end_ms + 1
         end_ms = start_ms + window_ms
 
-    # Trim to max if needed
-    if not exhaust:
-        results = results[:max_matches]
+    # Sem truncamento - retorna TODOS os resultados
+    
+    # Usa o diretório padrão se output_path não for absoluto
+    if not os.path.isabs(output_path):
+        DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        output_path = str(DEFAULT_OUTPUT_DIR / "2up_output_data.json")
+    
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
     ok(f"{EMO_SAVE} Wrote {len(results)} matches to {output_path}")
@@ -431,8 +454,8 @@ def scrape_api_only(
 
 def parse_args():
     p = argparse.ArgumentParser(description="Scrape upcoming soccer events from 2up.io (API-only).")
-    p.add_argument("--out", "-o", default="output_2up.json", help="Output JSON file path")
-    p.add_argument("--max", "-m", type=int, default=20, help="Maximum number of matches to fetch")
+    p.add_argument("--out", "-o", default=None, help="Output JSON file path (default: 2up_output_data.json in BANGERSURE_OUTPUT_DIR)")
+    p.add_argument("--max", "-m", type=int, default=None, help="Maximum number of matches to fetch (default: None = sem limite, coleta TODOS)")
     p.add_argument("--hours", type=int, default=48, help="Hours ahead window to fetch")
     p.add_argument("--page-size", type=int, default=50, help="Page size for API requests")
     p.add_argument("--start-page", type=int, default=1, help="Start page number")
@@ -446,11 +469,17 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # Se não foi especificado output, usa o padrão
+    output_path = args.out
+    if output_path is None:
+        DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        output_path = str(DEFAULT_OUTPUT_DIR / "2up_output_data.json")
     try:
-        info(f"Starting API-only scrape → out={args.out}, max={args.max}")
+        max_matches = args.max if args.max is not None else None
+        info(f"Starting API-only scrape → out={output_path}, max={'TODOS (sem limite)' if max_matches is None else max_matches}")
         scrape_api_only(
-            output_path=args.out,
-            max_matches=args.max,
+            output_path=output_path,
+            max_matches=max_matches,
             hours_ahead=args.hours,
             page_size=args.page_size,
             page_num_start=args.start_page,
@@ -458,7 +487,7 @@ def main():
             x_sign=args.sign,
             x_ts=args.ts,
             verbose=args.verbose,
-            exhaust=args.exhaust,
+            exhaust=True,  # Sempre True para coletar TODOS os dados
         )
     except Exception as e:
         err(f"Fatal error: {e}")
