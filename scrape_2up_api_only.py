@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
-DEFAULT_OUTPUT_DIR = Path(os.environ.get("BANGERSURE_OUTPUT_DIR", r"C:\xampp\htdocs\bangersure.com\data"))
+DEFAULT_OUTPUT_DIR = Path(os.environ.get("BANGERSURE_OUTPUT_DIR", r"C:\xampp\htdocs\bangersure.com\bangersure-App\data"))
 
 API_URL = "https://2up.io/api/sportProtal/web/event/date/list?eventDateList"
 REFERER_URL = "https://2up.io/pt/sports/home?section=upcoming&sport=soccer"
@@ -474,24 +474,44 @@ def main():
     if output_path is None:
         DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         output_path = str(DEFAULT_OUTPUT_DIR / "2up_output_data.json")
-    try:
-        max_matches = args.max if args.max is not None else None
-        info(f"Starting API-only scrape → out={output_path}, max={'TODOS (sem limite)' if max_matches is None else max_matches}")
-        scrape_api_only(
-            output_path=output_path,
-            max_matches=max_matches,
-            hours_ahead=args.hours,
-            page_size=args.page_size,
-            page_num_start=args.start_page,
-            cookies=args.cookies,
-            x_sign=args.sign,
-            x_ts=args.ts,
-            verbose=args.verbose,
-            exhaust=True,  # Sempre True para coletar TODOS os dados
-        )
-    except Exception as e:
-        err(f"Fatal error: {e}")
-        sys.exit(1)
+    
+    # Loop infinito
+    loop_count = 0
+    while True:
+        loop_count += 1
+        print(f"\n{'='*60}")
+        print(f"🔄 2UP SCRAPER - Execução #{loop_count}")
+        print(f"{'='*60}\n")
+        
+        try:
+            max_matches = args.max if args.max is not None else None
+            info(f"Starting API-only scrape → out={output_path}, max={'TODOS (sem limite)' if max_matches is None else max_matches}")
+            scrape_api_only(
+                output_path=output_path,
+                max_matches=max_matches,
+                hours_ahead=args.hours,
+                page_size=args.page_size,
+                page_num_start=args.start_page,
+                cookies=args.cookies,
+                x_sign=args.sign,
+                x_ts=args.ts,
+                verbose=args.verbose,
+                exhaust=True,  # Sempre True para coletar TODOS os dados
+            )
+            print(f"\n✅ Execução #{loop_count} concluída com sucesso!")
+        except KeyboardInterrupt:
+            print(f"\n\n⚠️  Interrompido pelo usuário. Encerrando...")
+            sys.exit(0)
+        except Exception as e:
+            err(f"Erro na execução #{loop_count}: {e}")
+            print(f"⏳ Aguardando 30 segundos antes de tentar novamente...")
+            time.sleep(30)
+        
+        # Aguarda antes de reiniciar
+        wait_time = 60  # 60 segundos entre execuções
+        print(f"\n⏸️  Aguardando {wait_time} segundos antes da próxima execução...")
+        print(f"   (Pressione Ctrl+C para encerrar)\n")
+        time.sleep(wait_time)
 
 
 if __name__ == "__main__":
